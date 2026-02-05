@@ -1,0 +1,331 @@
+"""PR Review orchestration - connects GitHub + Gemini."""
+
+import os
+import logging
+from dataclasses import dataclass, field
+
+from github_client import fetch_pr_metadata, fetch_raw_diff, PRMetadata
+from diff_parser import parse_diff, filter_files, extract_added_code, FileDiff
+from models import ReviewResult, Finding
+from prompts import REVIEW_PROMPT
+from pydantic import ValidationError
+
+from google import genai
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+USE_MOCK = os.getenv("USE_MOCK", "false").lower() == "true"
+DEFAULT_MODEL = "gemini-2.5-flash-lite"
+
+# Token limits (conservative estimates)
+# Gemini 2.5 Flash has ~1M context, but we keep chunks small for better results
+MAX_LINES_PER_CHUNK = 200      # Max lines to send in one request
+MAX_CHARS_PER_CHUNK = 15000    # Max characters (~3750 tokens)
+
+
+@dataclass
+class FileReview:
+    """Review results for a single file."""
+    filename: str
+    status: str
+    additions: int
+    findings: list[Finding] = field(default_factory=list)
+    error: str | None = None
+
+
+@dataclass
+class PRReview:
+    """Complete review results for a PR."""
+    repo: str
+    pr_number: int
+    pr_title: str
+    pr_author: str
+    files_reviewed: int
+    total_findings: int
+    file_reviews: list[FileReview] = field(default_factory=list)
+
+
+def get_gemini_client():
+    """Create Gemini client."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY not found in environment")
+    return genai.Client(api_key=api_key)
+
+
+def chunk_code(code: str, max_lines: int = MAX_LINES_PER_CHUNK, max_chars: int = MAX_CHARS_PER_CHUNK) -> list[str]:
+    """
+    Split large code into reviewable chunks.
+    
+    Tries to split at logical boundaries (empty lines, function definitions).
+    Each chunk preserves line numbers from the original.
+    
+    Args:
+        code: Code string with line numbers (e.g., "   1| def foo():")
+        max_lines: Maximum lines per chunk
+        max_chars: Maximum characters per chunk
+        
+    Returns:
+        List of code chunks, each small enough for one API call
+    """
+    lines = code.split('\n')
+    
+    # If code is small enough, return as-is
+    if len(lines) <= max_lines and len(code) <= max_chars:
+        return [code]
+    
+    chunks = []
+    current_chunk = []
+    current_chars = 0
+    
+    for line in lines:
+        line_with_newline = line + '\n'
+        
+        # Check if adding this line would exceed limits
+        would_exceed_lines = len(current_chunk) >= max_lines
+        would_exceed_chars = current_chars + len(line_with_newline) > max_chars
+        
+        if current_chunk and (would_exceed_lines or would_exceed_chars):
+            # Save current chunk and start new one
+            chunks.append('\n'.join(current_chunk))
+            current_chunk = []
+            current_chars = 0
+        
+        current_chunk.append(line)
+        current_chars += len(line_with_newline)
+    
+    # Don't forget the last chunk
+    if current_chunk:
+        chunks.append('\n'.join(current_chunk))
+    
+    return chunks
+
+
+def is_large_file(code: str) -> bool:
+    """Check if code exceeds chunk limits."""
+    lines = code.split('\n')
+    return len(lines) > MAX_LINES_PER_CHUNK or len(code) > MAX_CHARS_PER_CHUNK
+
+
+def analyze_code_chunk(code: str, filename: str, chunk_info: str = "", model: str = DEFAULT_MODEL) -> ReviewResult | None:
+    """Send a single code chunk to Gemini for review."""
+    import json
+    
+    if USE_MOCK:
+        return ReviewResult(
+            findings=[
+                Finding(
+                    severity="MEDIUM",
+                    category="bug",
+                    line=1,
+                    description="Mock finding for testing",
+                    fix="This is a mock fix"
+                )
+            ],
+            summary="Mock review"
+        )
+    
+    client = get_gemini_client()
+    
+    chunk_note = f" ({chunk_info})" if chunk_info else ""
+    prompt = f"""Review this Python code from file '{filename}'{chunk_note}.
+
+{REVIEW_PROMPT.format(code=code)}"""
+    
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config={"response_mime_type": "application/json"}
+        )
+        
+        text = response.text
+        start = text.find('{')
+        if start == -1:
+            logger.warning(f"No JSON found in response for {filename}")
+            return None
+        
+        decoder = json.JSONDecoder()
+        obj, _ = decoder.raw_decode(text[start:])
+        return ReviewResult.model_validate(obj)
+        
+    except ValidationError as e:
+        logger.warning(f"Validation error for {filename}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Error reviewing {filename}: {e}")
+        return None
+
+
+def analyze_code(code: str, filename: str, model: str = DEFAULT_MODEL) -> ReviewResult | None:
+    """
+    Send code to Gemini for review, handling large files with chunking.
+    
+    If code exceeds limits, splits into chunks and combines findings.
+    """
+    # Check if chunking is needed
+    if not is_large_file(code):
+        return analyze_code_chunk(code, filename, model=model)
+    
+    # Split into chunks and review each
+    chunks = chunk_code(code)
+    logger.info(f"  Large file detected - splitting into {len(chunks)} chunks")
+    
+    all_findings = []
+    summaries = []
+    
+    for i, chunk in enumerate(chunks, 1):
+        chunk_info = f"chunk {i}/{len(chunks)}"
+        logger.info(f"  Reviewing {chunk_info}...")
+        
+        result = analyze_code_chunk(chunk, filename, chunk_info=chunk_info, model=model)
+        
+        if result:
+            all_findings.extend(result.findings)
+            if result.summary:
+                summaries.append(result.summary)
+    
+    if not all_findings:
+        return None
+    
+    # Combine results
+    return ReviewResult(
+        findings=all_findings,
+        summary=f"Combined review of {len(chunks)} chunks: " + "; ".join(summaries[:3])
+    )
+
+
+def review_pr(repo: str, pr_number: int) -> PRReview:
+    """
+    Review a Pull Request using Gemini.
+    
+    Args:
+        repo: Repository in "owner/repo" format
+        pr_number: Pull request number
+        
+    Returns:
+        PRReview object with all findings
+    """
+    logger.info(f"Starting review of {repo} PR #{pr_number}")
+    
+    # 1. Fetch PR metadata
+    logger.info("Fetching PR metadata...")
+    metadata = fetch_pr_metadata(repo, pr_number)
+    logger.info(f"PR: {metadata.title} by {metadata.author}")
+    
+    # 2. Fetch the diff
+    logger.info("Fetching PR diff...")
+    raw_diff = fetch_raw_diff(repo, pr_number)
+    
+    # 3. Parse and filter files
+    logger.info("Parsing diff...")
+    all_files = parse_diff(raw_diff)
+    files_to_review = filter_files(all_files)
+    logger.info(f"Files to review: {len(files_to_review)} (filtered from {len(all_files)})")
+    
+    # 4. Review each file
+    file_reviews = []
+    total_findings = 0
+    
+    for file in files_to_review:
+        logger.info(f"Reviewing {file.filename}...")
+        
+        # Extract code to review
+        code = extract_added_code(file, include_line_numbers=True)
+        
+        if not code.strip():
+            logger.info(f"  Skipping {file.filename} - no code to review")
+            continue
+        
+        # Send to Gemini
+        result = analyze_code(code, file.filename)
+        
+        if result:
+            findings = result.findings
+            total_findings += len(findings)
+            
+            file_reviews.append(FileReview(
+                filename=file.filename,
+                status=file.status,
+                additions=file.additions,
+                findings=findings,
+            ))
+            
+            logger.info(f"  Found {len(findings)} issue(s) in {file.filename}")
+        else:
+            file_reviews.append(FileReview(
+                filename=file.filename,
+                status=file.status,
+                additions=file.additions,
+                error="Failed to analyze file",
+            ))
+    
+    # 5. Return complete review
+    return PRReview(
+        repo=repo,
+        pr_number=pr_number,
+        pr_title=metadata.title,
+        pr_author=metadata.author,
+        files_reviewed=len(file_reviews),
+        total_findings=total_findings,
+        file_reviews=file_reviews,
+    )
+
+
+def print_review(review: PRReview) -> None:
+    """Pretty print a PR review."""
+    print(f"\n{'='*60}")
+    print(f"📋 PR REVIEW: {review.repo} #{review.pr_number}")
+    print(f"{'='*60}")
+    print(f"Title: {review.pr_title}")
+    print(f"Author: {review.pr_author}")
+    print(f"Files reviewed: {review.files_reviewed}")
+    print(f"Total findings: {review.total_findings}")
+    
+    for file_review in review.file_reviews:
+        print(f"\n{'─'*60}")
+        print(f"📄 {file_review.filename} ({file_review.status}, +{file_review.additions})")
+        print(f"{'─'*60}")
+        
+        if file_review.error:
+            print(f"  ⚠️  Error: {file_review.error}")
+            continue
+        
+        if not file_review.findings:
+            print("  ✅ No issues found")
+            continue
+        
+        for finding in file_review.findings:
+            icon = {
+                "bug": "🐛",
+                "security": "🔒", 
+                "performance": "⚡",
+                "pep8": "📐"
+            }.get(finding.category, "❓")
+            
+            line_str = f"Line {finding.line}" if finding.line else "General"
+            print(f"\n  {icon} [{finding.severity}] {line_str}")
+            print(f"     {finding.description}")
+            if finding.fix:
+                print(f"     💡 Fix: {finding.fix}")
+    
+    print(f"\n{'='*60}")
+    print(f"Review complete: {review.total_findings} finding(s)")
+    print(f"{'='*60}\n")
+
+
+# Quick test
+if __name__ == "__main__":
+    TEST_REPO = "kulbir/PRLens"
+    TEST_PR = 1
+    
+    review = review_pr(TEST_REPO, TEST_PR)
+    print_review(review)
+
