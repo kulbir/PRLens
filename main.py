@@ -57,7 +57,8 @@ def analyze_code(code: str, model: str = DEFAULT_MODEL) -> ReviewResult | None:
     
     response = client.models.generate_content(
         model=model,
-        contents=prompt
+        contents=prompt,
+        config={"response_mime_type": "application/json"}
     )
     return parse_response(response.text)
 
