@@ -156,8 +156,8 @@ if __name__ == "__main__":
     load_dotenv()
     
     # Test with a public repo PR
-    TEST_REPO = "octocat/Hello-World"
-    TEST_PR = 2988
+    TEST_REPO = "kulbir/PRLens"
+    TEST_PR = 1
     
     try:
         # Test metadata

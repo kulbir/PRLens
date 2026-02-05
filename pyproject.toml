@@ -10,4 +10,5 @@ dependencies = [
     "pydantic>=2.0.0",
     "python-dotenv>=1.2.1",
     "pygithub>=2.8.1",
+    "unidiff>=0.7.5",
 ]
