@@ -1,37 +1,79 @@
 import os
+import sys
+import logging
+
 from google import genai
+from google.api_core.exceptions import GoogleAPIError
 from dotenv import load_dotenv
 
-# Load variables from .env
+from mock_data import MOCK_RESPONSE
+
 load_dotenv()
 
-def main():
-    # The new SDK automatically looks for the GEMINI_API_KEY env var
-    # but we can also pass it explicitly.
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# Configuration
+USE_MOCK = os.getenv("USE_MOCK", "false").lower() == "true"
+DEFAULT_MODEL = "gemini-2.5-flash-lite"
 
-    hardcoded_code = """
-    Analyze this code for potential bugs:
+# Logging setup
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+def get_api_key():
+    """Get API key from environment, fail fast if missing."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "GEMINI_API_KEY not found. Set it in .env file."
+        )
+    return api_key
+
+
+def analyze_code(code: str, model: str = DEFAULT_MODEL) -> str:
+    """Send code to Gemini for analysis and return the response."""
+    client = genai.Client(api_key=get_api_key())
     
-    def calculate_average(numbers):
-        total = sum(numbers)
-        return total / len(numbers)
+    prompt = f"Analyze this code for potential bugs:\n\n{code}"
+    
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt
+    )
+    return response.text
+
+
+def main() -> int:
+    """Main entry point."""
+    code_to_analyze = """
+def calculate_average(numbers):
+    total = sum(numbers)
+    return total / len(numbers)
     """
 
-    print("--- Communicating with Gemini ---")
-    
-    try:
-        # Note the change: client.models.generate_content
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite", # You can now use the latest models
-            contents=hardcoded_code
-        )
-        
+    logger.info("Starting code analysis...")
+
+    if USE_MOCK:
+        logger.info("[MOCK MODE - No API call made]")
         print("\nGemini's Response:")
-        print(response.text)
-        
-    except Exception as e:
-        print(f"An error occurred: {e}")
+        print(MOCK_RESPONSE)
+        return 0
+
+    try:
+        result = analyze_code(code_to_analyze)
+        print("\nGemini's Response:")
+        print(result)
+        return 0
+
+    except ValueError as e:
+        logger.error(f"Configuration error: {e}")
+        return 1
+    except GoogleAPIError as e:
+        logger.error(f"API error: {e}")
+        return 1
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
