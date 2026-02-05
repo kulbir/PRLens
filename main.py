@@ -7,6 +7,7 @@ from google.api_core.exceptions import GoogleAPIError
 from dotenv import load_dotenv
 
 from mock_data import MOCK_RESPONSE
+from prompts import REVIEW_PROMPT
 
 load_dotenv()
 
@@ -36,7 +37,7 @@ def analyze_code(code: str, model: str = DEFAULT_MODEL) -> str:
     """Send code to Gemini for analysis and return the response."""
     client = genai.Client(api_key=get_api_key())
     
-    prompt = f"Analyze this code for potential bugs:\n\n{code}"
+    prompt = REVIEW_PROMPT.format(code=code)
     
     response = client.models.generate_content(
         model=model,
