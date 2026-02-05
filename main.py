@@ -1,11 +1,11 @@
 import os
 import sys
-import json
 import re
 import logging
 
 from google import genai
 from google.api_core.exceptions import GoogleAPIError
+from pydantic import ValidationError
 from dotenv import load_dotenv
 
 from mock_data import MOCK_RESPONSE
@@ -42,9 +42,9 @@ def parse_response(text: str) -> ReviewResult | None:
     cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip())
     
     try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse JSON: {e}")
+        return ReviewResult.model_validate_json(cleaned)
+    except ValidationError as e:
+        logger.warning(f"Validation error: {e}")
         logger.debug(f"Raw response: {text}")
         return None
 
@@ -64,19 +64,19 @@ def analyze_code(code: str, model: str = DEFAULT_MODEL) -> ReviewResult | None:
 
 def print_findings(result: ReviewResult) -> None:
     """Pretty print the review findings."""
-    print(f"\n📋 Summary: {result.get('summary', 'N/A')}\n")
+    print(f"\n📋 Summary: {result.summary or 'N/A'}\n")
     
-    for finding in result.get("findings", []):
-        severity = finding.get("severity", "?")
-        category = finding.get("category", "?")
-        line = finding.get("line", "?")
-        desc = finding.get("description", "No description")
-        fix = finding.get("fix", "No fix provided")
+    for finding in result.findings:
+        icon = {
+            "bug": "🐛",
+            "security": "🔒",
+            "performance": "⚡",
+            "pep8": "📐"
+        }.get(finding.category, "❓")
         
-        icon = {"bug": "🐛", "security": "🔒", "performance": "⚡", "pep8": "📐"}.get(category, "❓")
-        
-        print(f"{icon} [{severity}] Line {line}: {desc}")
-        print(f"   💡 Fix: {fix}\n")
+        line_str = finding.line if finding.line is not None else "?"
+        print(f"{icon} [{finding.severity}] Line {line_str}: {finding.description}")
+        print(f"   💡 Fix: {finding.fix or 'No fix provided'}\n")
 
 
 def main() -> int:
