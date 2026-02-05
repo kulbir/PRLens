@@ -37,21 +37,28 @@ def get_api_key():
 
 
 def parse_response(text: str) -> ReviewResult | None:
-    # Try to extract JSON object from response
-    # Handles: raw JSON, markdown wrapped, or JSON with trailing text
-    match = re.search(r'\{[\s\S]*\}', text)
-    if not match:
+    """Parse Gemini response, extracting JSON and handling errors."""
+    import json
+    
+    # Find the start of JSON object
+    start = text.find('{')
+    if start == -1:
         logger.warning("No JSON object found in response")
         logger.debug(f"Raw response: {text}")
         return None
     
-    json_str = match.group(0)
-    
+    # Use raw_decode to parse JSON and ignore trailing content
     try:
-        return ReviewResult.model_validate_json(json_str)
+        decoder = json.JSONDecoder()
+        obj, _ = decoder.raw_decode(text[start:])
+        return ReviewResult.model_validate(obj)
+    except json.JSONDecodeError as e:
+        logger.warning(f"JSON decode error: {e}")
+        logger.debug(f"Raw response: {text}")
+        return None
     except ValidationError as e:
         logger.warning(f"Validation error: {e}")
-        logger.debug(f"Extracted JSON: {json_str}")
+        logger.debug(f"Raw response: {text}")
         return None
 
 
