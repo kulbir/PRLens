@@ -37,15 +37,21 @@ def get_api_key():
 
 
 def parse_response(text: str) -> ReviewResult | None:
-    """Parse Gemini response, stripping markdown and handling errors."""
-    # Remove markdown code block wrapper if present
-    cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip())
+    # Try to extract JSON object from response
+    # Handles: raw JSON, markdown wrapped, or JSON with trailing text
+    match = re.search(r'\{[\s\S]*\}', text)
+    if not match:
+        logger.warning("No JSON object found in response")
+        logger.debug(f"Raw response: {text}")
+        return None
+    
+    json_str = match.group(0)
     
     try:
-        return ReviewResult.model_validate_json(cleaned)
+        return ReviewResult.model_validate_json(json_str)
     except ValidationError as e:
         logger.warning(f"Validation error: {e}")
-        logger.debug(f"Raw response: {text}")
+        logger.debug(f"Extracted JSON: {json_str}")
         return None
 
 
