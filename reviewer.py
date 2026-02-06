@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from github_client import fetch_pr_metadata, fetch_raw_diff, PRMetadata
 from diff_parser import parse_diff, filter_files, extract_added_code, FileDiff
 from models import ReviewResult, Finding
-from prompts import REVIEW_PROMPT
+from prompts import REVIEW_PROMPT, SECURITY_PROMPT, QUALITY_PROMPT
 from pydantic import ValidationError
 
 from google import genai
@@ -200,6 +200,131 @@ def analyze_code(code: str, filename: str, model: str = DEFAULT_MODEL) -> Review
         findings=all_findings,
         summary=f"Combined review of {len(chunks)} chunks: " + "; ".join(summaries[:3])
     )
+
+
+# =============================================================================
+# SPECIALIZED REVIEWERS
+# =============================================================================
+
+def _review_with_prompt(
+    code: str, 
+    filename: str, 
+    prompt_template: str,
+    reviewer_name: str,
+    model: str = DEFAULT_MODEL
+) -> ReviewResult | None:
+    """
+    Generic function to review code with a specific prompt.
+    
+    Args:
+        code: The code to review
+        filename: Name of the file being reviewed
+        prompt_template: The prompt template to use (must have {code} placeholder)
+        reviewer_name: Name for logging (e.g., "security", "quality")
+        model: Gemini model to use
+        
+    Returns:
+        ReviewResult with findings, or None if failed
+    """
+    import json
+    
+    if USE_MOCK:
+        return ReviewResult(
+            findings=[],
+            summary=f"Mock {reviewer_name} review - no issues"
+        )
+    
+    client = get_gemini_client()
+    prompt = prompt_template.format(code=code)
+    
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config={"response_mime_type": "application/json"}
+        )
+        
+        text = response.text
+        start = text.find('{')
+        if start == -1:
+            logger.warning(f"No JSON found in {reviewer_name} response for {filename}")
+            return None
+        
+        decoder = json.JSONDecoder()
+        obj, _ = decoder.raw_decode(text[start:])
+        return ReviewResult.model_validate(obj)
+        
+    except ValidationError as e:
+        logger.warning(f"{reviewer_name} validation error for {filename}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"{reviewer_name} error reviewing {filename}: {e}")
+        return None
+
+
+def security_review(code: str, filename: str, model: str = DEFAULT_MODEL) -> ReviewResult | None:
+    """
+    Review code for SECURITY issues only.
+    
+    Uses a specialized prompt focused on:
+    - SQL Injection, Command Injection
+    - XSS, SSRF
+    - Hardcoded secrets
+    - Insecure deserialization
+    - Path traversal
+    - Weak cryptography
+    
+    Args:
+        code: The code to review
+        filename: Name of the file being reviewed
+        model: Gemini model to use
+        
+    Returns:
+        ReviewResult with security findings only
+    """
+    logger.info(f"  🔒 Security review: {filename}")
+    return _review_with_prompt(code, filename, SECURITY_PROMPT, "security", model)
+
+
+def quality_review(code: str, filename: str, model: str = DEFAULT_MODEL) -> ReviewResult | None:
+    """
+    Review code for QUALITY issues only.
+    
+    Uses a specialized prompt focused on:
+    - Code complexity
+    - Poor naming
+    - Code duplication
+    - Missing error handling
+    - Magic numbers/strings
+    
+    Args:
+        code: The code to review
+        filename: Name of the file being reviewed
+        model: Gemini model to use
+        
+    Returns:
+        ReviewResult with quality findings only
+    """
+    logger.info(f"  📐 Quality review: {filename}")
+    return _review_with_prompt(code, filename, QUALITY_PROMPT, "quality", model)
+
+
+def general_review(code: str, filename: str, model: str = DEFAULT_MODEL) -> ReviewResult | None:
+    """
+    Review code for general issues (bugs, performance, style).
+    
+    This is the original comprehensive review.
+    
+    Args:
+        code: The code to review
+        filename: Name of the file being reviewed
+        model: Gemini model to use
+        
+    Returns:
+        ReviewResult with all types of findings
+    """
+    logger.info(f"  🔍 General review: {filename}")
+    return analyze_code(code, filename, model)
 
 
 def review_pr(repo: str, pr_number: int) -> PRReview:

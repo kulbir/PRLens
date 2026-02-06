@@ -55,7 +55,12 @@ class ReviewState:
     diff: str = ""                               # Raw diff content
     files_to_review: list[FileDiff] = field(default_factory=list)
     
-    # AI analysis results
+    # Results from specialized reviewers (each reviewer writes to its own field)
+    security_findings: list[Finding] = field(default_factory=list)  # From security_reviewer
+    quality_findings: list[Finding] = field(default_factory=list)   # From quality_reviewer
+    general_findings: list[Finding] = field(default_factory=list)   # From general_reviewer
+    
+    # Merged AI analysis results (populated by merge_findings node)
     findings: list[Finding] = field(default_factory=list)
     summary: str = ""
     
@@ -168,7 +173,158 @@ def analyze_code(state: ReviewState) -> dict:
     logger.info(f"   {summary}")
     
     return {
-        "findings": all_findings,
+        "general_findings": all_findings,  # Changed: write to general_findings
+    }
+
+
+# =============================================================================
+# SPECIALIZED REVIEWER NODES
+# =============================================================================
+
+def security_reviewer(state: ReviewState) -> dict:
+    """
+    Security Reviewer Node: Focuses ONLY on security vulnerabilities.
+    
+    Reads: files_to_review
+    Writes: security_findings
+    """
+    from reviewer import security_review
+    
+    files = state.files_to_review
+    
+    if state.error or not files:
+        return {"security_findings": []}
+    
+    logger.info(f"🔒 Security Reviewer: Analyzing {len(files)} file(s)...")
+    
+    all_findings: list[Finding] = []
+    
+    for file in files:
+        review_content = get_review_content(file)
+        code = review_content["code"]
+        
+        if not code.strip():
+            continue
+        
+        try:
+            result = security_review(code, file.filename)
+            if result and result.findings:
+                all_findings.extend(result.findings)
+        except Exception as e:
+            logger.warning(f"   Security review failed for {file.filename}: {e}")
+    
+    logger.info(f"   🔒 Found {len(all_findings)} security issue(s)")
+    
+    return {"security_findings": all_findings}
+
+
+def quality_reviewer(state: ReviewState) -> dict:
+    """
+    Quality Reviewer Node: Focuses ONLY on code quality/maintainability.
+    
+    Reads: files_to_review
+    Writes: quality_findings
+    """
+    from reviewer import quality_review
+    
+    files = state.files_to_review
+    
+    if state.error or not files:
+        return {"quality_findings": []}
+    
+    logger.info(f"📐 Quality Reviewer: Analyzing {len(files)} file(s)...")
+    
+    all_findings: list[Finding] = []
+    
+    for file in files:
+        review_content = get_review_content(file)
+        code = review_content["code"]
+        
+        if not code.strip():
+            continue
+        
+        try:
+            result = quality_review(code, file.filename)
+            if result and result.findings:
+                all_findings.extend(result.findings)
+        except Exception as e:
+            logger.warning(f"   Quality review failed for {file.filename}: {e}")
+    
+    logger.info(f"   📐 Found {len(all_findings)} quality issue(s)")
+    
+    return {"quality_findings": all_findings}
+
+
+def general_reviewer(state: ReviewState) -> dict:
+    """
+    General Reviewer Node: Catches bugs, performance, and style issues.
+    
+    This is a renamed version of analyze_code that writes to general_findings.
+    
+    Reads: files_to_review
+    Writes: general_findings
+    """
+    # Reuse the existing analyze_code logic
+    return analyze_code(state)
+
+
+def merge_findings(state: ReviewState) -> dict:
+    """
+    Merge Node: Combines findings from all reviewers.
+    
+    Reads: security_findings, quality_findings, general_findings
+    Writes: findings, summary
+    
+    This node:
+    1. Combines all findings
+    2. Removes duplicates (same line + similar description)
+    3. Sorts by severity
+    """
+    logger.info("🔀 Merging findings from all reviewers...")
+    
+    # Combine all findings
+    all_findings = (
+        list(state.security_findings) +
+        list(state.quality_findings) +
+        list(state.general_findings)
+    )
+    
+    # Simple deduplication: remove findings with same line and similar description
+    seen = set()
+    unique_findings = []
+    
+    for finding in all_findings:
+        key = (finding.line, finding.description[:50] if finding.description else "")
+        if key not in seen:
+            seen.add(key)
+            unique_findings.append(finding)
+    
+    # Sort by severity (CRITICAL > HIGH > MEDIUM > LOW)
+    severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    unique_findings.sort(key=lambda f: severity_order.get(f.severity, 4))
+    
+    # Generate summary
+    security_count = len(state.security_findings)
+    quality_count = len(state.quality_findings)
+    general_count = len(state.general_findings)
+    
+    summary_parts = []
+    if security_count:
+        summary_parts.append(f"🔒 {security_count} security")
+    if quality_count:
+        summary_parts.append(f"📐 {quality_count} quality")
+    if general_count:
+        summary_parts.append(f"🔍 {general_count} general")
+    
+    if unique_findings:
+        summary = f"Found {len(unique_findings)} issue(s): " + ", ".join(summary_parts)
+    else:
+        summary = "No issues found. Code looks good! ✨"
+    
+    logger.info(f"   {summary}")
+    
+    return {
+        "findings": unique_findings,
         "summary": summary,
     }
 
@@ -238,36 +394,60 @@ def should_post_review(state: ReviewState) -> str:
 
 def build_review_graph() -> StateGraph:
     """
-    Build the review workflow graph.
+    Build the review workflow graph with PARALLEL reviewers.
     
     Flow:
-        START → fetch_pr_data → analyze_code → [DECISION]
-                                                   │
-                                    ┌──────────────┴──────────────┐
-                                    │                             │
-                              (has issues)                  (no issues)
-                                    │                             │
-                                    ▼                             ▼
-                              post_review                        END
-                                    │
-                                    ▼
-                                   END
+        START → fetch_pr_data → [PARALLEL REVIEWERS] → merge_findings → [DECISION]
+                                       │                                    │
+                        ┌──────────────┼──────────────┐         ┌───────────┴───────────┐
+                        │              │              │         │                       │
+                        ▼              ▼              ▼    (has issues)           (no issues)
+                   security       quality        general        │                       │
+                   reviewer       reviewer       reviewer       ▼                       ▼
+                        │              │              │    post_review                 END
+                        └──────────────┼──────────────┘         │
+                                       │                        ▼
+                                       ▼                       END
+                                merge_findings
     """
     # Create the graph with our state type
     graph = StateGraph(ReviewState)
     
     # Add nodes (the functions that do work)
     graph.add_node("fetch_pr_data", fetch_pr_data)
-    graph.add_node("analyze_code", analyze_code)
+    
+    # Specialized reviewers (will run in parallel)
+    graph.add_node("security_reviewer", security_reviewer)
+    graph.add_node("quality_reviewer", quality_reviewer)
+    graph.add_node("general_reviewer", general_reviewer)
+    
+    # Merge findings from all reviewers
+    graph.add_node("merge_findings", merge_findings)
+    
+    # Post review
     graph.add_node("post_review", post_review_node)
     
-    # Add edges (the flow between nodes)
-    graph.add_edge(START, "fetch_pr_data")           # Start → fetch
-    graph.add_edge("fetch_pr_data", "analyze_code")  # fetch → analyze
+    # =========================================================================
+    # EDGES: Define the flow
+    # =========================================================================
     
-    # Conditional edge: after analyze, decide what to do
+    # Start → fetch
+    graph.add_edge(START, "fetch_pr_data")
+    
+    # fetch → ALL reviewers (parallel execution)
+    # When a node has multiple outgoing edges, LangGraph runs them in parallel
+    graph.add_edge("fetch_pr_data", "security_reviewer")
+    graph.add_edge("fetch_pr_data", "quality_reviewer")
+    graph.add_edge("fetch_pr_data", "general_reviewer")
+    
+    # ALL reviewers → merge (waits for all to complete)
+    graph.add_edge("security_reviewer", "merge_findings")
+    graph.add_edge("quality_reviewer", "merge_findings")
+    graph.add_edge("general_reviewer", "merge_findings")
+    
+    # Conditional edge: after merge, decide what to do
     graph.add_conditional_edges(
-        "analyze_code",      # From this node...
+        "merge_findings",    # From this node...
         should_post_review,  # Run this function to decide...
         {                    # Map return values to next nodes:
             "post_review": "post_review",  # If has issues → post review
@@ -288,12 +468,12 @@ def create_agent():
 
 
 # =============================================================================
-# MAIN - Test the minimal graph
+# MAIN - Test the multi-reviewer graph
 # =============================================================================
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("🤖 PRLens Agent - LangGraph Review Agent")
+    print("🤖 PRLens Agent - Multi-Reviewer LangGraph Agent")
     print("=" * 60)
     
     # Create the agent
@@ -310,7 +490,7 @@ if __name__ == "__main__":
     print(f"   pr_number: {initial_state.pr_number}")
     
     print("\n" + "-" * 60)
-    print("Running graph...")
+    print("Running graph with 3 parallel reviewers...")
     print("-" * 60 + "\n")
     
     # Run the graph
@@ -323,15 +503,24 @@ if __name__ == "__main__":
     # Final state is returned as a dict by LangGraph
     print("\n📋 Final State:")
     files = final_state.get("files_to_review", [])
-    findings = final_state.get("findings", [])
+    security_findings = final_state.get("security_findings", [])
+    quality_findings = final_state.get("quality_findings", [])
+    general_findings = final_state.get("general_findings", [])
+    merged_findings = final_state.get("findings", [])
     summary = final_state.get("summary", "")
     error = final_state.get("error")
     review_posted = final_state.get("review_posted", False)
     review_id = final_state.get("review_id")
     
     print(f"   files_to_review: {len(files)} file(s)")
-    print(f"   findings: {len(findings)} found")
-    print(f"   summary: {summary}")
+    print(f"\n   📊 Findings by Reviewer:")
+    print(f"      🔒 Security: {len(security_findings)}")
+    print(f"      📐 Quality:  {len(quality_findings)}")
+    print(f"      🔍 General:  {len(general_findings)}")
+    print(f"      ─────────────────")
+    print(f"      📋 Merged:   {len(merged_findings)} (after dedup)")
+    
+    print(f"\n   summary: {summary}")
     print(f"   review_posted: {review_posted}")
     if review_id:
         print(f"   review_id: {review_id}")
@@ -339,14 +528,24 @@ if __name__ == "__main__":
     if error:
         print(f"\n❌ Error: {error}")
     
-    if findings:
-        print("\n🔍 Findings (first 5):")
-        for i, finding in enumerate(findings[:5], 1):
+    if merged_findings:
+        print("\n🔍 Top Findings (first 10):")
+        for i, finding in enumerate(merged_findings[:10], 1):
             # Handle both Finding objects and dicts
             if hasattr(finding, 'severity'):
-                print(f"   {i}. [{finding.severity}] Line {finding.line}: {finding.description}")
+                sev = finding.severity
+                line = finding.line
+                desc = finding.description
+                cat = finding.category
             else:
-                print(f"   {i}. [{finding['severity']}] Line {finding['line']}: {finding['description']}")
-        if len(findings) > 5:
-            print(f"   ... and {len(findings) - 5} more")
+                sev = finding['severity']
+                line = finding['line']
+                desc = finding['description']
+                cat = finding.get('category', '?')
+            
+            icon = {"security": "🔒", "quality": "📐"}.get(cat, "🔍")
+            print(f"   {i}. {icon} [{sev}] Line {line}: {desc[:60]}...")
+        
+        if len(merged_findings) > 10:
+            print(f"\n   ... and {len(merged_findings) - 10} more findings")
 
