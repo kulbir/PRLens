@@ -1,19 +1,19 @@
 """Shared configuration and utilities for PRLens."""
 
+import functools
+import json
+import logging
 import os
 import re
-import json
 import time
-import logging
-import functools
 
 from dotenv import load_dotenv
 from google import genai
 from google.api_core.exceptions import (
-    ServiceUnavailable,
-    TooManyRequests,
     DeadlineExceeded,
     InternalServerError,
+    ServiceUnavailable,
+    TooManyRequests,
 )
 from pydantic import ValidationError
 
@@ -84,10 +84,9 @@ def with_retry(
                 except retryable as exc:
                     last_exc = exc
                     if attempt < max_retries - 1:
-                        delay = base_delay * (2 ** attempt)
+                        delay = base_delay * (2**attempt)
                         logger.warning(
-                            "Attempt %d/%d for %s failed: %s. "
-                            "Retrying in %.1fs…",
+                            "Attempt %d/%d for %s failed: %s. Retrying in %.1fs…",
                             attempt + 1,
                             max_retries,
                             func.__name__,
@@ -152,4 +151,3 @@ def parse_llm_json(text: str) -> ReviewResult | None:
     except ValidationError as e:
         logger.warning("Pydantic validation error: %s", e)
         return None
-

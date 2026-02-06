@@ -1,8 +1,8 @@
 """GitHub API client for PR operations."""
 
-import os
-import logging
 import functools
+import logging
+import os
 from dataclasses import dataclass, field
 
 import requests
@@ -115,9 +115,7 @@ def fetch_pr_metadata(repo: str, pr_number: int) -> PRMetadata:
     except GithubException as e:
         if e.status == 404:
             raise ValueError(f"PR #{pr_number} not found in {repo}") from e
-        raise ValueError(
-            f"GitHub API error: {e.data.get('message', str(e))}"
-        ) from e
+        raise ValueError(f"GitHub API error: {e.data.get('message', str(e))}") from e
 
 
 def fetch_changed_files(repo: str, pr_number: int) -> list[ChangedFile]:
@@ -155,9 +153,7 @@ def fetch_changed_files(repo: str, pr_number: int) -> list[ChangedFile]:
     except GithubException as e:
         if e.status == 404:
             raise ValueError(f"PR #{pr_number} not found in {repo}") from e
-        raise ValueError(
-            f"GitHub API error: {e.data.get('message', str(e))}"
-        ) from e
+        raise ValueError(f"GitHub API error: {e.data.get('message', str(e))}") from e
 
 
 @with_retry(
@@ -300,9 +296,7 @@ def post_review(repo: str, pr_number: int, review: ReviewSubmission) -> int:
         return github_review.id
 
     except GithubException as e:
-        error_msg = (
-            e.data.get("message", str(e)) if hasattr(e, "data") else str(e)
-        )
+        error_msg = e.data.get("message", str(e)) if hasattr(e, "data") else str(e)
         logger.error("Failed to post review: %s", error_msg)
 
         if hasattr(e, "data") and "errors" in e.data:
@@ -400,9 +394,7 @@ if __name__ == "__main__":
             print(f"   Changes: +{file.additions} -{file.deletions}")
             if file.patch:
                 preview = (
-                    file.patch[:200] + "..."
-                    if len(file.patch) > 200
-                    else file.patch
+                    file.patch[:200] + "..." if len(file.patch) > 200 else file.patch
                 )
                 print(f"   Patch preview:\n{preview}")
             print()
@@ -442,7 +434,7 @@ If you see this, the write-back is working! 🎉
         print("POSTING REVIEW WITH INLINE COMMENTS")
         print("=" * 50)
 
-        from diff_parser import parse_diff, build_line_mapping
+        from diff_parser import build_line_mapping, parse_diff
 
         raw_diff = fetch_raw_diff(TEST_REPO, TEST_PR)
         files = parse_diff(raw_diff)

@@ -4,15 +4,15 @@ import logging
 from dataclasses import dataclass, field
 
 from config import (
-    USE_MOCK,
     DEFAULT_MODEL,
+    USE_MOCK,
     call_gemini,
     parse_llm_json,
 )
+from diff_parser import extract_added_code, filter_files, parse_diff
 from github_client import fetch_pr_metadata, fetch_raw_diff
-from diff_parser import parse_diff, filter_files, extract_added_code, FileDiff
-from models import ReviewResult, Finding
-from prompts import REVIEW_PROMPT, SECURITY_PROMPT, QUALITY_PROMPT
+from models import Finding, ReviewResult
+from prompts import QUALITY_PROMPT, REVIEW_PROMPT, SECURITY_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -173,9 +173,7 @@ def analyze_code(
         chunk_info = f"chunk {i}/{len(chunks)}"
         logger.info("  Reviewing %s...", chunk_info)
 
-        result = analyze_code_chunk(
-            chunk, filename, chunk_info=chunk_info, model=model
-        )
+        result = analyze_code_chunk(chunk, filename, chunk_info=chunk_info, model=model)
 
         if result:
             all_findings.extend(result.findings)
@@ -189,8 +187,7 @@ def analyze_code(
     return ReviewResult(
         findings=all_findings,
         summary=(
-            f"Combined review of {len(chunks)} chunks: "
-            + "; ".join(summaries[:3])
+            f"Combined review of {len(chunks)} chunks: " + "; ".join(summaries[:3])
         ),
     )
 
@@ -376,9 +373,7 @@ def review_pr(repo: str, pr_number: int) -> PRReview:
                 )
             )
 
-            logger.info(
-                "  Found %d issue(s) in %s", len(findings), file.filename
-            )
+            logger.info("  Found %d issue(s) in %s", len(findings), file.filename)
         else:
             file_reviews.append(
                 FileReview(
@@ -403,21 +398,21 @@ def review_pr(repo: str, pr_number: int) -> PRReview:
 
 def print_review(review: PRReview) -> None:
     """Pretty print a PR review."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"📋 PR REVIEW: {review.repo} #{review.pr_number}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"Title: {review.pr_title}")
     print(f"Author: {review.pr_author}")
     print(f"Files reviewed: {review.files_reviewed}")
     print(f"Total findings: {review.total_findings}")
 
     for file_review in review.file_reviews:
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print(
             f"📄 {file_review.filename} "
             f"({file_review.status}, +{file_review.additions})"
         )
-        print(f"{'─'*60}")
+        print(f"{'─' * 60}")
 
         if file_review.error:
             print(f"  ⚠️  Error: {file_review.error}")
@@ -443,9 +438,9 @@ def print_review(review: PRReview) -> None:
             if finding.fix:
                 print(f"     💡 Fix: {finding.fix}")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Review complete: {review.total_findings} finding(s)")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
 
 # Quick test

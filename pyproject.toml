@@ -14,3 +14,20 @@ dependencies = [
     "unidiff>=0.7.5",
     "langgraph>=1.0.8",
 ]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.1.0",
+    "ruff>=0.9.6",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["config", "models", "prompts", "mock_data", "diff_parser", "github_client", "reviewer", "agent"]

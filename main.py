@@ -1,14 +1,14 @@
 """PRLens — simple CLI entry point for quick code analysis."""
 
-import sys
 import logging
+import sys
 
 from google.api_core.exceptions import GoogleAPIError
 
-from config import USE_MOCK, DEFAULT_MODEL, call_gemini, parse_llm_json
+from config import DEFAULT_MODEL, USE_MOCK, call_gemini, parse_llm_json
 from mock_data import MOCK_RESPONSE
-from prompts import REVIEW_PROMPT
 from models import ReviewResult
+from prompts import REVIEW_PROMPT
 
 logger = logging.getLogger(__name__)
 

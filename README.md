@@ -6,41 +6,63 @@ An AI-powered Pull Request review agent that automatically analyzes code changes
 
 When a PR is created, PRLens:
 1. **Fetches** the PR diff from GitHub
-2. **Analyzes** code changes using Google Gemini AI
-3. **Decides** if there are issues worth reporting
-4. **Posts** review comments directly on the PR
-
-```
-PR Created → Fetch Diff → AI Analysis → Post Comments (if issues found)
-```
+2. **Analyzes** code changes with three specialised AI reviewers running in parallel
+3. **Merges & deduplicates** findings across reviewers
+4. **Posts** a review directly on the PR (if issues are found)
 
 ## Architecture
 
-PRLens uses **LangGraph** to orchestrate the review workflow as a state machine:
+PRLens uses **LangGraph** to orchestrate the review workflow as a state machine with parallel execution:
 
 ```
-START → fetch_pr_data → analyze_code → [has issues?]
-                                            │
-                                  ┌─────────┴─────────┐
-                                  │                   │
-                                 YES                  NO
-                                  │                   │
-                            post_review              END
-                                  │
-                                 END
+                         ┌──────────────┐
+                         │    START     │
+                         └──────┬───────┘
+                                ▼
+                       ┌────────────────┐
+                       │ fetch_pr_data  │
+                       └───┬────┬────┬──┘
+                           │    │    │        ← parallel fan-out
+                ┌──────────┘    │    └──────────┐
+                ▼               ▼               ▼
+        ┌──────────────┐ ┌────────────┐ ┌──────────────┐
+        │   security   │ │  quality   │ │   general    │
+        │   reviewer   │ │  reviewer  │ │   reviewer   │
+        └──────┬───────┘ └─────┬──────┘ └──────┬───────┘
+               └───────────────┼───────────────┘
+                               ▼              ← join
+                      ┌────────────────┐
+                      │ merge_findings │
+                      └───────┬────────┘
+                              ▼
+                       has issues?
+                      ╱            ╲
+                    YES             NO
+                     ▼               ▼
+              ┌─────────────┐    ┌───────┐
+              │ post_review │    │  END  │
+              └──────┬──────┘    └───────┘
+                     ▼
+                  ┌───────┐
+                  │  END  │
+                  └───────┘
 ```
 
 ## Project Structure
 
 ```
 PRLens/
-├── agent.py          # LangGraph workflow (State, Nodes, Edges)
-├── github_client.py  # GitHub API (fetch PRs, post comments)
-├── diff_parser.py    # Parse unified diffs
-├── main.py           # Gemini AI code analysis
-├── models.py         # Data models (Finding, ReviewResult)
-├── prompts.py        # AI prompts for code review
-└── .env              # API keys (GITHUB_TOKEN, GEMINI_API_KEY)
+├── agent.py              # LangGraph workflow (state, nodes, edges)
+├── config.py             # Shared config, cached clients, retry, JSON parsing
+├── github_client.py      # GitHub API (fetch PRs, post reviews)
+├── diff_parser.py        # Parse unified diffs, filter files
+├── reviewer.py           # Gemini-powered code review (general, security, quality)
+├── main.py               # Simple CLI entry point for quick analysis
+├── models.py             # Pydantic models (Finding, ReviewResult)
+├── prompts.py            # Prompt templates for each reviewer
+├── mock_data.py          # Mock responses for offline testing
+├── pyproject.toml        # Dependencies & tool config
+└── .env                  # API keys (GITHUB_TOKEN, GEMINI_API_KEY)
 ```
 
 ## Setup
@@ -61,13 +83,19 @@ PRLens/
    uv run python agent.py
    ```
 
+4. **Install pre-commit hooks** (optional):
+   ```bash
+   uv run pre-commit install
+   ```
+
 ## Tech Stack
 
 - **Python 3.12+**
-- **LangGraph** — Workflow orchestration
-- **Google Gemini** — AI code analysis
+- **LangGraph** — Workflow orchestration with parallel execution
+- **Google Gemini** — AI code analysis (security, quality, general)
 - **PyGithub** — GitHub API client
 - **Pydantic** — Data validation
+- **Ruff** — Linting & formatting
 
 ## License
 
