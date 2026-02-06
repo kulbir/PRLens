@@ -12,14 +12,14 @@ MOCK_RESPONSE = """{
     },
     {
       "severity": "LOW",
-      "category": "pep8",
+      "category": "style",
       "line": 1,
       "description": "Missing module docstring",
       "fix": "Add module docstring at top of file"
     },
     {
       "severity": "LOW",
-      "category": "pep8",
+      "category": "style",
       "line": 2,
       "description": "Missing function docstring",
       "fix": "Add docstring: Calculate the average of a list of numbers."

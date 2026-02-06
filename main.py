@@ -1,93 +1,39 @@
-import os
+"""PRLens — simple CLI entry point for quick code analysis."""
+
 import sys
-import re
 import logging
 
-from google import genai
 from google.api_core.exceptions import GoogleAPIError
-from pydantic import ValidationError
-from dotenv import load_dotenv
 
+from config import USE_MOCK, DEFAULT_MODEL, call_gemini, parse_llm_json
 from mock_data import MOCK_RESPONSE
 from prompts import REVIEW_PROMPT
 from models import ReviewResult
 
-load_dotenv()
-
-# Configuration
-USE_MOCK = os.getenv("USE_MOCK", "false").lower() == "true"
-DEFAULT_MODEL = "gemini-2.5-flash-lite"
-
-# Logging setup
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
 logger = logging.getLogger(__name__)
-
-
-def get_api_key():
-    """Get API key from environment, fail fast if missing."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError(
-            "GEMINI_API_KEY not found. Set it in .env file."
-        )
-    return api_key
-
-
-def parse_response(text: str) -> ReviewResult | None:
-    """Parse Gemini response, extracting JSON and handling errors."""
-    import json
-    
-    # Find the start of JSON object
-    start = text.find('{')
-    if start == -1:
-        logger.warning("No JSON object found in response")
-        logger.debug(f"Raw response: {text}")
-        return None
-    
-    # Use raw_decode to parse JSON and ignore trailing content
-    try:
-        decoder = json.JSONDecoder()
-        obj, _ = decoder.raw_decode(text[start:])
-        return ReviewResult.model_validate(obj)
-    except json.JSONDecodeError as e:
-        logger.warning(f"JSON decode error: {e}")
-        logger.debug(f"Raw response: {text}")
-        return None
-    except ValidationError as e:
-        logger.warning(f"Validation error: {e}")
-        logger.debug(f"Raw response: {text}")
-        return None
 
 
 def analyze_code(code: str, model: str = DEFAULT_MODEL) -> ReviewResult | None:
     """Send code to Gemini for analysis and return parsed result."""
-    client = genai.Client(api_key=get_api_key())
-    
     prompt = REVIEW_PROMPT.format(code=code)
-    
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config={"response_mime_type": "application/json"}
-    )
-    return parse_response(response.text)
+    text = call_gemini(prompt, model)
+    return parse_llm_json(text)
 
 
 def print_findings(result: ReviewResult) -> None:
     """Pretty print the review findings."""
     print(f"\n📋 Summary: {result.summary or 'N/A'}\n")
-    
+
     for finding in result.findings:
         icon = {
             "bug": "🐛",
             "security": "🔒",
             "performance": "⚡",
-            "pep8": "📐"
+            "pep8": "📐",
+            "style": "📐",
+            "quality": "📐",
         }.get(finding.category, "❓")
-        
+
         line_str = finding.line if finding.line is not None else "?"
         print(f"{icon} [{finding.severity}] Line {line_str}: {finding.description}")
         print(f"   💡 Fix: {finding.fix or 'No fix provided'}\n")
@@ -105,7 +51,7 @@ def calculate_average(numbers):
 
     if USE_MOCK:
         logger.info("[MOCK MODE - No API call made]")
-        result = parse_response(MOCK_RESPONSE)
+        result = parse_llm_json(MOCK_RESPONSE)
         if result:
             print_findings(result)
         else:
@@ -122,10 +68,10 @@ def calculate_average(numbers):
         return 0
 
     except ValueError as e:
-        logger.error(f"Configuration error: {e}")
+        logger.error("Configuration error: %s", e)
         return 1
     except GoogleAPIError as e:
-        logger.error(f"API error: {e}")
+        logger.error("API error: %s", e)
         return 1
 
 

@@ -1,7 +1,6 @@
 """Parser for unified diff format using unidiff library."""
 
 from dataclasses import dataclass, field
-from typing import Optional
 from unidiff import PatchSet
 
 
@@ -125,7 +124,7 @@ def find_nearest_valid_line(
     mapping: DiffLineMapping, 
     target_line: int,
     max_distance: int = 5
-) -> Optional[int]:
+) -> int | None:
     """
     Find the nearest valid line in the diff to the target line.
     
