@@ -173,6 +173,65 @@ def analyze_code(state: ReviewState) -> dict:
     }
 
 
+def post_review_node(state: ReviewState) -> dict:
+    """
+    Node 3: Post review comments to GitHub.
+    
+    This node reads: repo, pr_number, findings, summary
+    This node updates: review_posted, review_id, error
+    """
+    logger.info("📝 Posting review to GitHub...")
+    
+    try:
+        # Build review comments from findings
+        # Note: For now we post summary only, since findings don't have file path
+        review = ReviewSubmission(
+            body=f"## 🤖 PRLens Review\n\n{state.summary}",
+            event="COMMENT",
+            comments=[],  # We'll add inline comments later when we track file paths
+        )
+        
+        review_id = post_review(state.repo, state.pr_number, review)
+        
+        logger.info(f"   ✅ Posted review #{review_id}")
+        
+        return {
+            "review_posted": True,
+            "review_id": review_id,
+        }
+        
+    except Exception as e:
+        logger.error(f"   ❌ Failed to post review: {e}")
+        return {
+            "review_posted": False,
+            "error": str(e),
+        }
+
+
+# =============================================================================
+# DECISION FUNCTIONS (for conditional edges)
+# =============================================================================
+
+def should_post_review(state: ReviewState) -> str:
+    """
+    Decide whether to post a review or end.
+    
+    This is called by LangGraph after analyze_code to determine the next node.
+    
+    Returns:
+        "post_review" if there are findings
+        "end" if no findings (code looks good)
+    """
+    findings = state.get("findings", []) if isinstance(state, dict) else state.findings
+    
+    if findings and len(findings) > 0:
+        logger.info(f"🔀 Decision: {len(findings)} issues found → posting review")
+        return "post_review"
+    else:
+        logger.info("🔀 Decision: No issues found → ending")
+        return "end"
+
+
 # =============================================================================
 # GRAPH CONSTRUCTION
 # =============================================================================
@@ -181,14 +240,17 @@ def build_review_graph() -> StateGraph:
     """
     Build the review workflow graph.
     
-    Current flow (minimal):
-        START → fetch_pr_data → analyze_code → END
-    
-    Future flow (full):
-        START → fetch_pr_data → analyze_code → post_review → END
-                                     ↓
-                              (if no findings)
-                                     ↓
+    Flow:
+        START → fetch_pr_data → analyze_code → [DECISION]
+                                                   │
+                                    ┌──────────────┴──────────────┐
+                                    │                             │
+                              (has issues)                  (no issues)
+                                    │                             │
+                                    ▼                             ▼
+                              post_review                        END
+                                    │
+                                    ▼
                                    END
     """
     # Create the graph with our state type
@@ -197,11 +259,24 @@ def build_review_graph() -> StateGraph:
     # Add nodes (the functions that do work)
     graph.add_node("fetch_pr_data", fetch_pr_data)
     graph.add_node("analyze_code", analyze_code)
+    graph.add_node("post_review", post_review_node)
     
     # Add edges (the flow between nodes)
-    graph.add_edge(START, "fetch_pr_data")      # Start → Node 1
-    graph.add_edge("fetch_pr_data", "analyze_code")  # Node 1 → Node 2
-    graph.add_edge("analyze_code", END)         # Node 2 → End
+    graph.add_edge(START, "fetch_pr_data")           # Start → fetch
+    graph.add_edge("fetch_pr_data", "analyze_code")  # fetch → analyze
+    
+    # Conditional edge: after analyze, decide what to do
+    graph.add_conditional_edges(
+        "analyze_code",      # From this node...
+        should_post_review,  # Run this function to decide...
+        {                    # Map return values to next nodes:
+            "post_review": "post_review",  # If has issues → post review
+            "end": END,                     # If no issues → end
+        }
+    )
+    
+    # After posting review, we're done
+    graph.add_edge("post_review", END)
     
     return graph
 
@@ -251,20 +326,27 @@ if __name__ == "__main__":
     findings = final_state.get("findings", [])
     summary = final_state.get("summary", "")
     error = final_state.get("error")
+    review_posted = final_state.get("review_posted", False)
+    review_id = final_state.get("review_id")
     
     print(f"   files_to_review: {len(files)} file(s)")
     print(f"   findings: {len(findings)} found")
     print(f"   summary: {summary}")
+    print(f"   review_posted: {review_posted}")
+    if review_id:
+        print(f"   review_id: {review_id}")
     
     if error:
         print(f"\n❌ Error: {error}")
     
     if findings:
-        print("\n🔍 Findings:")
-        for i, finding in enumerate(findings, 1):
+        print("\n🔍 Findings (first 5):")
+        for i, finding in enumerate(findings[:5], 1):
             # Handle both Finding objects and dicts
             if hasattr(finding, 'severity'):
                 print(f"   {i}. [{finding.severity}] Line {finding.line}: {finding.description}")
             else:
                 print(f"   {i}. [{finding['severity']}] Line {finding['line']}: {finding['description']}")
+        if len(findings) > 5:
+            print(f"   ... and {len(findings) - 5} more")
 
