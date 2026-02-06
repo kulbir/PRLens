@@ -192,6 +192,79 @@ def general_reviewer(state: ReviewState) -> dict:
 # =============================================================================
 # MERGE NODE
 # =============================================================================
+_SEVERITY_ORDER: dict[str, int] = {
+    "CRITICAL": 0,
+    "HIGH": 1,
+    "MEDIUM": 2,
+    "LOW": 3,
+}
+
+
+def _normalise(text: str) -> str:
+    """Lower-case, collapse whitespace, strip punctuation for fuzzy matching."""
+    import re
+
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s]", "", text)
+    return re.sub(r"\s+", " ", text)
+
+
+def _words(text: str) -> set[str]:
+    """Return the set of meaningful words (length ≥ 3) in *text*."""
+    return {w for w in _normalise(text).split() if len(w) >= 3}
+
+
+def _is_similar(desc_a: str, desc_b: str, threshold: float = 0.6) -> bool:
+    """Check whether two descriptions are similar using word-overlap ratio."""
+    words_a = _words(desc_a)
+    words_b = _words(desc_b)
+    if not words_a or not words_b:
+        return desc_a[:50] == desc_b[:50]
+    overlap = len(words_a & words_b)
+    smaller = min(len(words_a), len(words_b))
+    return (overlap / smaller) >= threshold
+
+
+def _dedup_findings(all_findings: list[Finding]) -> list[Finding]:
+    """
+    Deduplicate findings, keeping the highest severity on conflict.
+
+    Two findings are considered duplicates when they share the same
+    file path and line number **and** their descriptions are similar
+    (≥ 60 % word overlap).
+    """
+    # Bucket by (path, line) for efficient comparison
+    buckets: dict[tuple[str | None, int | None], list[Finding]] = {}
+    for finding in all_findings:
+        key = (finding.path, finding.line)
+        buckets.setdefault(key, []).append(finding)
+
+    unique: list[Finding] = []
+
+    for group in buckets.values():
+        # Within each bucket, merge similar descriptions
+        merged: list[Finding] = []
+        for finding in group:
+            duplicate_of = None
+            for existing in merged:
+                if _is_similar(finding.description, existing.description):
+                    duplicate_of = existing
+                    break
+
+            if duplicate_of is None:
+                merged.append(finding)
+            else:
+                # Keep the higher severity
+                dup_rank = _SEVERITY_ORDER.get(duplicate_of.severity, 4)
+                new_rank = _SEVERITY_ORDER.get(finding.severity, 4)
+                if new_rank < dup_rank:
+                    duplicate_of.severity = finding.severity
+
+        unique.extend(merged)
+
+    return unique
+
+
 def merge_findings(state: ReviewState) -> dict:
     """
     Merge Node: Combines findings from all reviewers.
@@ -200,9 +273,10 @@ def merge_findings(state: ReviewState) -> dict:
     Writes: findings, summary
 
     This node:
-    1. Combines all findings
-    2. Removes duplicates (same line + similar description)
-    3. Sorts by severity
+    1. Combines all findings from every reviewer
+    2. Deduplicates by (path, line, description similarity)
+    3. On conflict keeps the highest severity
+    4. Sorts results CRITICAL → HIGH → MEDIUM → LOW
     """
     logger.info("🔀 Merging findings from all reviewers...")
 
@@ -213,22 +287,11 @@ def merge_findings(state: ReviewState) -> dict:
         + list(state.general_findings)
     )
 
-    # Simple deduplication: remove findings with same line and similar description
-    seen: set[tuple[int | None, str]] = set()
-    unique_findings: list[Finding] = []
+    # Deduplicate
+    unique_findings = _dedup_findings(all_findings)
 
-    for finding in all_findings:
-        key = (
-            finding.line,
-            finding.description[:50] if finding.description else "",
-        )
-        if key not in seen:
-            seen.add(key)
-            unique_findings.append(finding)
-
-    # Sort by severity (CRITICAL > HIGH > MEDIUM > LOW)
-    severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
-    unique_findings.sort(key=lambda f: severity_order.get(f.severity, 4))
+    # Sort by severity
+    unique_findings.sort(key=lambda f: _SEVERITY_ORDER.get(f.severity, 4))
 
     # Generate summary
     security_count = len(state.security_findings)
@@ -243,8 +306,14 @@ def merge_findings(state: ReviewState) -> dict:
     if general_count:
         summary_parts.append(f"🔍 {general_count} general")
 
+    total_before = len(all_findings)
+    total_after = len(unique_findings)
+    deduped = total_before - total_after
+
     if unique_findings:
-        summary = f"Found {len(unique_findings)} issue(s): " + ", ".join(summary_parts)
+        summary = f"Found {total_after} issue(s): " + ", ".join(summary_parts)
+        if deduped:
+            summary += f" ({deduped} duplicate(s) removed)"
     else:
         summary = "No issues found. Code looks good! ✨"
 
@@ -429,82 +498,27 @@ def create_agent():
 
 
 # =============================================================================
-# MAIN - Test the multi-reviewer graph
+# MAIN
 # =============================================================================
 if __name__ == "__main__":
-    print("=" * 60)
-    print("🤖 PRLens Agent - Multi-Reviewer LangGraph Agent")
-    print("=" * 60)
-
-    # Create the agent
     agent = create_agent()
 
-    # Define initial state using the dataclass
     initial_state = ReviewState(
         repo="kulbir/PRLens",
         pr_number=1,
     )
 
-    print("\n📋 Initial State:")
-    print(f"   repo: {initial_state.repo}")
-    print(f"   pr_number: {initial_state.pr_number}")
-
-    print("\n" + "-" * 60)
-    print("Running graph with 3 parallel reviewers...")
-    print("-" * 60 + "\n")
-
-    # Run the graph
+    logger.info(
+        "🤖 Running PRLens agent on %s PR #%d",
+        initial_state.repo,
+        initial_state.pr_number,
+    )
     final_state = agent.invoke(initial_state)
 
-    print("\n" + "-" * 60)
-    print("Graph complete!")
-    print("-" * 60)
-
-    # Final state is returned as a dict by LangGraph
-    print("\n📋 Final State:")
-    files = final_state.get("files_to_review", [])
-    security_findings = final_state.get("security_findings", [])
-    quality_findings = final_state.get("quality_findings", [])
-    general_findings = final_state.get("general_findings", [])
-    merged_findings = final_state.get("findings", [])
     summary = final_state.get("summary", "")
     error = final_state.get("error")
-    review_posted = final_state.get("review_posted", False)
-    review_id = final_state.get("review_id")
-
-    print(f"   files_to_review: {len(files)} file(s)")
-    print("\n   📊 Findings by Reviewer:")
-    print(f"      🔒 Security: {len(security_findings)}")
-    print(f"      📐 Quality:  {len(quality_findings)}")
-    print(f"      🔍 General:  {len(general_findings)}")
-    print("      ─────────────────")
-    print(f"      📋 Merged:   {len(merged_findings)} (after dedup)")
-
-    print(f"\n   summary: {summary}")
-    print(f"   review_posted: {review_posted}")
-    if review_id:
-        print(f"   review_id: {review_id}")
 
     if error:
-        print(f"\n❌ Error: {error}")
-
-    if merged_findings:
-        print("\n🔍 Top Findings (first 10):")
-        for i, finding in enumerate(merged_findings[:10], 1):
-            # Handle both Finding objects and dicts
-            if hasattr(finding, "severity"):
-                sev = finding.severity
-                line = finding.line
-                desc = finding.description
-                cat = finding.category
-            else:
-                sev = finding["severity"]
-                line = finding["line"]
-                desc = finding["description"]
-                cat = finding.get("category", "?")
-
-            icon = {"security": "🔒", "quality": "📐"}.get(cat, "🔍")
-            print(f"   {i}. {icon} [{sev}] Line {line}: {desc[:60]}...")
-
-        if len(merged_findings) > 10:
-            print(f"\n   ... and {len(merged_findings) - 10} more findings")
+        logger.error("❌ %s", error)
+    else:
+        logger.info("✅ %s", summary)

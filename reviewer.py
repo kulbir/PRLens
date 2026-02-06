@@ -441,12 +441,3 @@ def print_review(review: PRReview) -> None:
     print(f"\n{'=' * 60}")
     print(f"Review complete: {review.total_findings} finding(s)")
     print(f"{'=' * 60}\n")
-
-
-# Quick test
-if __name__ == "__main__":
-    TEST_REPO = "kulbir/PRLens"
-    TEST_PR = 1
-
-    review = review_pr(TEST_REPO, TEST_PR)
-    print_review(review)
