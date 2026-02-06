@@ -1,7 +1,18 @@
 """Parser for unified diff format using unidiff library."""
 
 from dataclasses import dataclass, field
+from typing import Optional
 from unidiff import PatchSet
+
+
+@dataclass
+class DiffLineMapping:
+    """Maps actual line numbers to diff positions for a file."""
+    filename: str
+    # Maps line number (in new file) -> position in diff (1-based)
+    line_to_position: dict[int, int] = field(default_factory=dict)
+    # Set of valid line numbers that can receive comments
+    valid_lines: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -62,6 +73,135 @@ def parse_diff(diff_text: str) -> list[FileDiff]:
         ))
     
     return files
+
+
+def build_line_mapping(diff_text: str) -> dict[str, DiffLineMapping]:
+    """
+    Build a mapping from line numbers to diff positions for all files.
+    
+    GitHub's review API needs either:
+    - position: 1-based offset within the diff hunk (legacy)
+    - line + side: actual line number with LEFT/RIGHT (modern)
+    
+    We use the modern API (line + side), but this function also builds
+    the position mapping for fallback and helps validate which lines
+    are actually in the diff (you can only comment on changed lines).
+    
+    Args:
+        diff_text: Raw unified diff string
+        
+    Returns:
+        Dict mapping filename -> DiffLineMapping
+    """
+    patch_set = PatchSet(diff_text)
+    mappings = {}
+    
+    for patched_file in patch_set:
+        filename = patched_file.path
+        mapping = DiffLineMapping(filename=filename)
+        
+        position = 0  # Position counter across all hunks
+        
+        for hunk in patched_file:
+            for line in hunk:
+                position += 1
+                
+                # We can only comment on lines that appear in the diff
+                # For added/modified lines, use target_line_no (new file)
+                # For removed lines, use source_line_no (old file)
+                
+                if line.is_added or line.is_context:
+                    # These lines exist in the new version of the file
+                    if line.target_line_no is not None:
+                        mapping.line_to_position[line.target_line_no] = position
+                        mapping.valid_lines.add(line.target_line_no)
+        
+        mappings[filename] = mapping
+    
+    return mappings
+
+
+def find_nearest_valid_line(
+    mapping: DiffLineMapping, 
+    target_line: int,
+    max_distance: int = 5
+) -> Optional[int]:
+    """
+    Find the nearest valid line in the diff to the target line.
+    
+    Sometimes AI findings reference lines that aren't in the diff
+    (e.g., context around the change). This finds the closest line
+    that we can actually comment on.
+    
+    Args:
+        mapping: DiffLineMapping for the file
+        target_line: The line number we want to comment on
+        max_distance: Maximum lines away to search
+        
+    Returns:
+        Nearest valid line number, or None if none within range
+    """
+    if target_line in mapping.valid_lines:
+        return target_line
+    
+    # Search outward from target
+    for distance in range(1, max_distance + 1):
+        if target_line + distance in mapping.valid_lines:
+            return target_line + distance
+        if target_line - distance in mapping.valid_lines:
+            return target_line - distance
+    
+    return None
+
+
+def validate_finding_lines(
+    findings: list[dict],
+    mappings: dict[str, DiffLineMapping],
+    max_distance: int = 5
+) -> tuple[list[dict], list[dict]]:
+    """
+    Validate and adjust findings to ensure they map to valid diff lines.
+    
+    Args:
+        findings: List of findings with 'path' and 'line' keys
+        mappings: Dict of filename -> DiffLineMapping
+        max_distance: How far to search for nearest valid line
+        
+    Returns:
+        Tuple of (valid_findings, unmapped_findings)
+        - valid_findings: Findings with adjusted line numbers
+        - unmapped_findings: Findings that couldn't be mapped
+    """
+    valid = []
+    unmapped = []
+    
+    for finding in findings:
+        path = finding.get("path", "")
+        line = finding.get("line")
+        
+        # If no line specified, can't post as inline comment
+        if line is None:
+            unmapped.append(finding)
+            continue
+        
+        # If file not in diff, can't comment
+        if path not in mappings:
+            unmapped.append(finding)
+            continue
+        
+        mapping = mappings[path]
+        valid_line = find_nearest_valid_line(mapping, line, max_distance)
+        
+        if valid_line is not None:
+            adjusted_finding = finding.copy()
+            adjusted_finding["line"] = valid_line
+            if valid_line != line:
+                adjusted_finding["original_line"] = line
+            valid.append(adjusted_finding)
+        else:
+            unmapped.append(finding)
+    
+    return valid, unmapped
 
 
 # File extensions to skip during review
