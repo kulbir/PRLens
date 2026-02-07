@@ -33,18 +33,6 @@ class PRMetadata:
 
 
 @dataclass
-class ChangedFile:
-    """A file changed in a Pull Request."""
-
-    filename: str
-    status: str  # added, removed, modified, renamed
-    additions: int  # lines added
-    deletions: int  # lines deleted
-    changes: int  # total lines changed
-    patch: str | None  # the diff/patch for this file
-
-
-@dataclass
 class ReviewComment:
     """A comment to post on a specific line in a PR."""
 
@@ -118,44 +106,6 @@ def fetch_pr_metadata(repo: str, pr_number: int) -> PRMetadata:
         raise ValueError(f"GitHub API error: {e.data.get('message', str(e))}") from e
 
 
-def fetch_changed_files(repo: str, pr_number: int) -> list[ChangedFile]:
-    """
-    Fetch list of files changed in a PR.
-
-    Args:
-        repo: Repository in "owner/repo" format
-        pr_number: Pull request number
-
-    Returns:
-        List of ChangedFile objects with file details and patches
-    """
-    repo = validate_repo(repo)
-    client = get_github_client()
-
-    try:
-        repository = client.get_repo(repo)
-        pr = repository.get_pull(pr_number)
-
-        files = []
-        for file in pr.get_files():
-            files.append(
-                ChangedFile(
-                    filename=file.filename,
-                    status=file.status,
-                    additions=file.additions,
-                    deletions=file.deletions,
-                    changes=file.changes,
-                    patch=file.patch,
-                )
-            )
-        return files
-
-    except GithubException as e:
-        if e.status == 404:
-            raise ValueError(f"PR #{pr_number} not found in {repo}") from e
-        raise ValueError(f"GitHub API error: {e.data.get('message', str(e))}") from e
-
-
 @with_retry(
     max_retries=3,
     base_delay=1.0,
@@ -205,40 +155,6 @@ def fetch_raw_diff(repo: str, pr_number: int) -> str:
 # ---------------------------------------------------------------------------
 # Write operations
 # ---------------------------------------------------------------------------
-def post_pr_comment(repo: str, pr_number: int, body: str) -> int:
-    """
-    Post a general comment on a PR (not attached to a specific line).
-
-    This appears in the PR conversation, not inline with code.
-    Useful for summaries or when findings don't map to specific lines.
-
-    Args:
-        repo: Repository in "owner/repo" format
-        pr_number: Pull request number
-        body: Comment text (supports markdown)
-
-    Returns:
-        Comment ID
-
-    Raises:
-        ValueError: If posting fails
-    """
-    repo = validate_repo(repo)
-    client = get_github_client()
-
-    try:
-        repository = client.get_repo(repo)
-        pr = repository.get_pull(pr_number)
-        comment = pr.create_issue_comment(body)
-        logger.info("Posted comment %d on PR #%d", comment.id, pr_number)
-        return comment.id
-
-    except GithubException as e:
-        raise ValueError(
-            f"Failed to post comment: {e.data.get('message', str(e))}"
-        ) from e
-
-
 def post_review(repo: str, pr_number: int, review: ReviewSubmission) -> int:
     """
     Post a complete review with inline comments to a PR.
@@ -304,56 +220,3 @@ def post_review(repo: str, pr_number: int, review: ReviewSubmission) -> int:
                 logger.error("  - %s", error)
 
         raise ValueError(f"Failed to post review: {error_msg}") from e
-
-
-def post_review_with_fallback(
-    repo: str,
-    pr_number: int,
-    review: ReviewSubmission,
-) -> dict:
-    """
-    Post a review, falling back to general comment if line comments fail.
-
-    Some findings may not map to valid diff lines. This function tries
-    to post inline comments first, and falls back to a general comment
-    if that fails.
-
-    Args:
-        repo: Repository in "owner/repo" format
-        pr_number: Pull request number
-        review: ReviewSubmission with body, event type, and comments
-
-    Returns:
-        Dict with 'review_id' and/or 'comment_id', plus 'fallback' boolean
-    """
-    repo = validate_repo(repo)
-    result: dict = {"fallback": False}
-
-    # If no inline comments, just post the summary as a general comment
-    if not review.comments:
-        if review.body:
-            result["comment_id"] = post_pr_comment(repo, pr_number, review.body)
-        return result
-
-    # Try posting as a proper review with inline comments
-    try:
-        result["review_id"] = post_review(repo, pr_number, review)
-        return result
-
-    except ValueError as e:
-        logger.warning("Review failed, falling back to general comment: %s", e)
-        result["fallback"] = True
-
-        # Format findings as a markdown comment
-        fallback_body = review.body + "\n\n" if review.body else ""
-        fallback_body += "## Inline Comments\n\n"
-        fallback_body += (
-            "_Could not post as inline comments. Listing here instead:_\n\n"
-        )
-
-        for comment in review.comments:
-            fallback_body += f"**{comment.path}** (line {comment.line}):\n"
-            fallback_body += f"> {comment.body}\n\n"
-
-        result["comment_id"] = post_pr_comment(repo, pr_number, fallback_body)
-        return result

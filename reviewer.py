@@ -1,7 +1,6 @@
 """PR Review orchestration - connects GitHub + Gemini."""
 
 import logging
-from dataclasses import dataclass, field
 
 from config import (
     DEFAULT_MODEL,
@@ -9,8 +8,6 @@ from config import (
     call_gemini,
     parse_llm_json,
 )
-from diff_parser import extract_added_code, filter_files, parse_diff
-from github_client import fetch_pr_metadata, fetch_raw_diff
 from models import Finding, ReviewResult
 from prompts import QUALITY_PROMPT, REVIEW_PROMPT, SECURITY_PROMPT
 
@@ -20,33 +17,6 @@ logger = logging.getLogger(__name__)
 # Gemini 2.5 Flash has ~1M context, but we keep chunks small for better results
 MAX_LINES_PER_CHUNK = 200  # Max lines to send in one request
 MAX_CHARS_PER_CHUNK = 15000  # Max characters (~3750 tokens)
-
-
-# ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
-@dataclass
-class FileReview:
-    """Review results for a single file."""
-
-    filename: str
-    status: str
-    additions: int
-    findings: list[Finding] = field(default_factory=list)
-    error: str | None = None
-
-
-@dataclass
-class PRReview:
-    """Complete review results for a PR."""
-
-    repo: str
-    pr_number: int
-    pr_title: str
-    pr_author: str
-    files_reviewed: int
-    total_findings: int
-    file_reviews: list[FileReview] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -284,160 +254,3 @@ def quality_review(
     """
     logger.info("  📐 Quality review: %s", filename)
     return _review_with_prompt(code, filename, QUALITY_PROMPT, "quality", model)
-
-
-def general_review(
-    code: str,
-    filename: str,
-    model: str = DEFAULT_MODEL,
-) -> ReviewResult | None:
-    """
-    Review code for general issues (bugs, performance, style).
-
-    This is the original comprehensive review.
-
-    Args:
-        code: The code to review
-        filename: Name of the file being reviewed
-        model: Gemini model to use
-
-    Returns:
-        ReviewResult with all types of findings
-    """
-    logger.info("  🔍 General review: %s", filename)
-    return analyze_code(code, filename, model)
-
-
-# ---------------------------------------------------------------------------
-# High-level PR review
-# ---------------------------------------------------------------------------
-def review_pr(repo: str, pr_number: int) -> PRReview:
-    """
-    Review a Pull Request using Gemini.
-
-    Args:
-        repo: Repository in "owner/repo" format
-        pr_number: Pull request number
-
-    Returns:
-        PRReview object with all findings
-    """
-    logger.info("Starting review of %s PR #%d", repo, pr_number)
-
-    # 1. Fetch PR metadata
-    logger.info("Fetching PR metadata...")
-    metadata = fetch_pr_metadata(repo, pr_number)
-    logger.info("PR: %s by %s", metadata.title, metadata.author)
-
-    # 2. Fetch the diff
-    logger.info("Fetching PR diff...")
-    raw_diff = fetch_raw_diff(repo, pr_number)
-
-    # 3. Parse and filter files
-    logger.info("Parsing diff...")
-    all_files = parse_diff(raw_diff)
-    files_to_review = filter_files(all_files)
-    logger.info(
-        "Files to review: %d (filtered from %d)",
-        len(files_to_review),
-        len(all_files),
-    )
-
-    # 4. Review each file
-    file_reviews: list[FileReview] = []
-    total_findings = 0
-
-    for file in files_to_review:
-        logger.info("Reviewing %s...", file.filename)
-
-        # Extract code to review
-        code = extract_added_code(file, include_line_numbers=True)
-
-        if not code.strip():
-            logger.info("  Skipping %s - no code to review", file.filename)
-            continue
-
-        # Send to Gemini
-        result = analyze_code(code, file.filename)
-
-        if result:
-            findings = result.findings
-            total_findings += len(findings)
-
-            file_reviews.append(
-                FileReview(
-                    filename=file.filename,
-                    status=file.status,
-                    additions=file.additions,
-                    findings=findings,
-                )
-            )
-
-            logger.info("  Found %d issue(s) in %s", len(findings), file.filename)
-        else:
-            file_reviews.append(
-                FileReview(
-                    filename=file.filename,
-                    status=file.status,
-                    additions=file.additions,
-                    error="Failed to analyze file",
-                )
-            )
-
-    # 5. Return complete review
-    return PRReview(
-        repo=repo,
-        pr_number=pr_number,
-        pr_title=metadata.title,
-        pr_author=metadata.author,
-        files_reviewed=len(file_reviews),
-        total_findings=total_findings,
-        file_reviews=file_reviews,
-    )
-
-
-def print_review(review: PRReview) -> None:
-    """Pretty print a PR review."""
-    print(f"\n{'=' * 60}")
-    print(f"📋 PR REVIEW: {review.repo} #{review.pr_number}")
-    print(f"{'=' * 60}")
-    print(f"Title: {review.pr_title}")
-    print(f"Author: {review.pr_author}")
-    print(f"Files reviewed: {review.files_reviewed}")
-    print(f"Total findings: {review.total_findings}")
-
-    for file_review in review.file_reviews:
-        print(f"\n{'─' * 60}")
-        print(
-            f"📄 {file_review.filename} "
-            f"({file_review.status}, +{file_review.additions})"
-        )
-        print(f"{'─' * 60}")
-
-        if file_review.error:
-            print(f"  ⚠️  Error: {file_review.error}")
-            continue
-
-        if not file_review.findings:
-            print("  ✅ No issues found")
-            continue
-
-        for finding in file_review.findings:
-            icon = {
-                "bug": "🐛",
-                "security": "🔒",
-                "performance": "⚡",
-                "pep8": "📐",
-                "style": "📐",
-                "quality": "📐",
-            }.get(finding.category, "❓")
-
-            line_str = f"Line {finding.line}" if finding.line else "General"
-            print(f"\n  {icon} [{finding.severity}] {line_str}")
-            print(f"     {finding.description}")
-            if finding.fix:
-                print(f"     💡 Fix: {finding.fix}")
-
-    print(f"\n{'=' * 60}")
-    print(f"Review complete: {review.total_findings} finding(s)")
-    print(f"{'=' * 60}\n")

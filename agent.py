@@ -7,6 +7,7 @@ their findings are merged and deduplicated, then optionally posted to GitHub.
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 from langgraph.graph import END, START, StateGraph
@@ -202,8 +203,6 @@ _SEVERITY_ORDER: dict[str, int] = {
 
 def _normalise(text: str) -> str:
     """Lower-case, collapse whitespace, strip punctuation for fuzzy matching."""
-    import re
-
     text = text.lower().strip()
     text = re.sub(r"[^\w\s]", "", text)
     return re.sub(r"\s+", " ", text)
@@ -328,61 +327,76 @@ def merge_findings(state: ReviewState) -> dict:
 # =============================================================================
 # FORMATTING & POSTING
 # =============================================================================
+def _truncate(text: str, max_len: int) -> str:
+    """Truncate text and append '...' if it exceeds *max_len*."""
+    return (text[:max_len] + "...") if len(text) > max_len else text
+
+
+def _format_findings_table(
+    findings: list[Finding],
+    heading: str,
+    columns: list[str],
+    row_fn,
+) -> list[str]:
+    """Build a markdown table section for a group of findings."""
+    if not findings:
+        return []
+
+    lines: list[str] = [f"\n### {heading}\n"]
+    lines.append("| " + " | ".join(columns) + " |")
+    lines.append("| " + " | ".join("---" for _ in columns) + " |")
+    for f in findings:
+        lines.append(row_fn(f))
+    return lines
+
+
 def format_findings_markdown(state: ReviewState) -> str:
     """Format all findings as a detailed markdown report."""
-    lines: list[str] = []
-    lines.append("## 🤖 PRLens Review\n")
-    lines.append(f"**{state.summary}**\n")
+    lines: list[str] = [
+        "## 🤖 PRLens Review\n",
+        f"**{state.summary}**\n",
+    ]
 
     # Security findings
-    if state.security_findings:
-        lines.append("\n### 🔒 Security Issues\n")
-        lines.append("| Severity | File | Line | Issue | Fix |")
-        lines.append("|----------|------|------|-------|-----|")
-        for f in state.security_findings:
-            desc = (
-                (f.description[:60] + "...")
-                if len(f.description) > 60
-                else f.description
-            )
-            fix = (f.fix[:40] + "...") if f.fix and len(f.fix) > 40 else (f.fix or "-")
-            path = f.path or "-"
-            lines.append(
-                f"| **{f.severity}** | {path} | {f.line or '-'} | {desc} | {fix} |"
-            )
+    lines.extend(
+        _format_findings_table(
+            state.security_findings,
+            "🔒 Security Issues",
+            ["Severity", "File", "Line", "Issue", "Fix"],
+            lambda f: (
+                f"| **{f.severity}** | {f.path or '-'} | {f.line or '-'} "
+                f"| {_truncate(f.description, 60)} "
+                f"| {_truncate(f.fix, 40) if f.fix else '-'} |"
+            ),
+        )
+    )
 
     # Quality findings
-    if state.quality_findings:
-        lines.append("\n### 📐 Quality Issues\n")
-        lines.append("| Severity | File | Line | Issue | Fix |")
-        lines.append("|----------|------|------|-------|-----|")
-        for f in state.quality_findings:
-            desc = (
-                (f.description[:60] + "...")
-                if len(f.description) > 60
-                else f.description
-            )
-            fix = (f.fix[:40] + "...") if f.fix and len(f.fix) > 40 else (f.fix or "-")
-            path = f.path or "-"
-            lines.append(
-                f"| {f.severity} | {path} | {f.line or '-'} | {desc} | {fix} |"
-            )
+    lines.extend(
+        _format_findings_table(
+            state.quality_findings,
+            "📐 Quality Issues",
+            ["Severity", "File", "Line", "Issue", "Fix"],
+            lambda f: (
+                f"| {f.severity} | {f.path or '-'} | {f.line or '-'} "
+                f"| {_truncate(f.description, 60)} "
+                f"| {_truncate(f.fix, 40) if f.fix else '-'} |"
+            ),
+        )
+    )
 
     # General findings
-    if state.general_findings:
-        lines.append("\n### 🔍 General Issues (Bugs, Performance, Style)\n")
-        lines.append("| Severity | File | Line | Category | Issue |")
-        lines.append("|----------|------|------|----------|-------|")
-        for f in state.general_findings:
-            desc = (
-                (f.description[:60] + "...")
-                if len(f.description) > 60
-                else f.description
-            )
-            path = f.path or "-"
-            lines.append(
-                f"| {f.severity} | {path} | {f.line or '-'} | {f.category} | {desc} |"
-            )
+    lines.extend(
+        _format_findings_table(
+            state.general_findings,
+            "🔍 General Issues (Bugs, Performance, Style)",
+            ["Severity", "File", "Line", "Category", "Issue"],
+            lambda f: (
+                f"| {f.severity} | {f.path or '-'} | {f.line or '-'} "
+                f"| {f.category} | {_truncate(f.description, 60)} |"
+            ),
+        )
+    )
 
     lines.append("\n---")
     lines.append("*Generated by [PRLens](https://github.com/kulbir/PRLens) 🤖*")
@@ -436,11 +450,10 @@ def should_post_review(state: ReviewState) -> str:
         "post_review" if there are findings
         "end" if no findings (code looks good)
     """
-    # Defensive: LangGraph may pass state as dict or dataclass
-    findings = state.get("findings", []) if isinstance(state, dict) else state.findings
-
-    if findings:
-        logger.info("🔀 Decision: %d issues found → posting review", len(findings))
+    if state.findings:
+        logger.info(
+            "🔀 Decision: %d issues found → posting review", len(state.findings)
+        )
         return "post_review"
 
     logger.info("🔀 Decision: No issues found → ending")

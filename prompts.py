@@ -129,9 +129,9 @@ SECURITY_PROMPT = (
     "Example:\n"
     '{{"findings":[{{"severity":"CRITICAL","category":"security","line":5,'
     '"description":"SQL Injection — user input concatenated into query",'
-    '"fix":"Use parameterized query: cursor.execute(\\"SELECT * '
-    'FROM users WHERE id = %s\\, (user_id,))"}},"'
-    '"summary":"1 critical security issue"}}'
+    '"fix":"Use parameterized query: '
+    'cursor.execute(\\"SELECT * FROM users WHERE id = %s\\", (user_id,))"'
+    '}}],"summary":"1 critical security issue"}}'
 )
 
 
